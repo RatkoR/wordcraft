@@ -905,20 +905,33 @@ impl Ctx<'_> {
             if float.wrap != Wrap::Inline || float.rot != 0.0 {
                 continue;
             }
-            let key = (*id, w.to_bits());
-            let h = match self.fitted.get(&key) {
-                Some(h) => *h,
-                None => {
-                    let h = textbox::fitted_height(self, *id, *w);
-                    self.fitted.insert(key, h);
-                    h
-                }
-            };
-            if let Some(h) = h {
+            if let Some(h) = self.fitted_height(*id, *w) {
                 out.push((k, h));
             }
         }
         out
+    }
+
+    /// [`textbox::fitted_height`], worked out once per layout.
+    fn fitted_height(&mut self, id: u32, w: f32) -> Option<f32> {
+        let key = (id, w.to_bits());
+        if let Some(h) = self.fitted.get(&key) {
+            return *h;
+        }
+        let h = textbox::fitted_height(self, id, w);
+        self.fitted.insert(key, h);
+        h
+    }
+
+    /// A floating (not inline) picture, chart or shape: its size and placement. A text box that
+    /// resizes to fit its text is as tall as its text.
+    fn floating<'o>(&mut self, o: &'o InlineObject) -> Option<(f32, f32, &'o Float)> {
+        let (w, h, float) = o.frame().filter(|(_, _, float)| float.wrap != Wrap::Inline)?;
+        let fitted = match o {
+            InlineObject::Shape { story: Some(id), .. } if float.rot == 0.0 => self.fitted_height(*id, w),
+            _ => None,
+        };
+        Some((w, fitted.unwrap_or(h), float))
     }
 
     /// The cache key of `p` laid out with these inputs, and its first automatic equation number
@@ -1258,7 +1271,7 @@ fn layout_box(
                 let mut pinned = HashMap::new();
                 let left_out = left_out_objects(ctx.doc, p, table.map(|t| &t.chr), ctx.opts.show_hidden, ctx.hide_deleted);
                 for (oi, o) in p.objects.iter().enumerate() {
-                    let Some((w, h, float)) = floating(o) else { continue };
+                    let Some((w, h, float)) = ctx.floating(o) else { continue };
                     if left_out(oi) {
                         continue;
                     }
@@ -2903,11 +2916,6 @@ impl PageFrame<'_> {
     }
 }
 
-/// A floating (not inline) picture, chart or shape: its size and placement.
-fn floating(o: &InlineObject) -> Option<(f32, f32, &Float)> {
-    o.frame().filter(|(_, _, float)| float.wrap != Wrap::Inline)
-}
-
 /// Where a floating object goes, in the coordinates of the box `frame` places on the page.
 /// `col` is the column (or cell) left edge and width, `y0` the anchor paragraph's top. Without a
 /// frame (table cells, text boxes, notes) positions relative to the page or margins fall back
@@ -3098,7 +3106,7 @@ fn anchor_floats(
         // it takes no room either.
         let left_out = left_out_objects(ctx.doc, p, None, ctx.opts.show_hidden, ctx.hide_deleted);
         for (oi, o) in p.objects.iter().enumerate() {
-            let Some((w, h, float)) = floating(o) else { continue };
+            let Some((w, h, float)) = ctx.floating(o) else { continue };
             if left_out(oi) {
                 continue;
             }
@@ -3239,7 +3247,7 @@ fn place_objects(
                 continue;
             }
             let Some(obj) = p.objects.get(oi) else { continue };
-            let Some((w, h, float)) = obj.frame() else { continue };
+            let Some((w, h, float)) = ctx.floating(obj).or_else(|| obj.frame()) else { continue };
             let floating = float.wrap != Wrap::Inline;
             if if floating { !first } else { !in_piece } {
                 continue;

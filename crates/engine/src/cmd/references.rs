@@ -903,15 +903,9 @@ fn floating_caption(s: &mut Session, pos: &Pos, float: &Float, para: Paragraph, 
     let at = Pos { off: pos.off + OBJ.len_utf8(), ..pos.clone() };
     s.doc.insert_object(&at, obj, &CharProps::default())?;
     update_seq(s)?;
-    // Fit the box to its laid-out lines; above the picture, its bottom meets the picture's top.
+    // Keep the height the box fits to; above the picture, its bottom meets the picture's top.
     s.touch();
-    let story = StoryRef::Part(id);
-    let (start, end) = (s.doc.start_of(story), s.doc.end_of(story));
-    let layout = s.layout();
-    let box_top = layout.object(&at, pic.page).map(|o| o.rect.y);
-    let bottom = layout.selection_rects(&s.doc, &start, &end, pic.page).iter().map(|(_, r)| r.bottom()).reduce(f32::max);
-    if let (Some(box_top), Some(bottom)) = (box_top, bottom) {
-        let h = bottom - box_top;
+    if let Some(h) = s.layout().object(&at, pic.page).map(|o| o.rect.h) {
         let p = s.doc.para_mut(at.story, &at.path)?;
         if let Some(o) = p.object_at_mut(at.off) {
             o.set_size(pic.rect.w, h);
@@ -921,7 +915,7 @@ fn floating_caption(s: &mut Session, pos: &Pos, float: &Float, para: Paragraph, 
         }
         p.touch();
     }
-    s.sel = Selection::caret(end);
+    s.sel = Selection::caret(s.doc.end_of(StoryRef::Part(id)));
     sel_result(s)
 }
 
