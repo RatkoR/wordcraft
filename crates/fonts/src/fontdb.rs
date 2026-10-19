@@ -1656,6 +1656,10 @@ impl FontDb {
                 }
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if base.is_none() && self.indexed_fallback_run(chars) {
+            base = self.loaded_covering(chars, exclude);
+        }
         let base = base?;
         if !bold && !italic {
             return Some(base);
@@ -1725,11 +1729,9 @@ impl FontDb {
         false
     }
 
-    /// Load the first cataloged font file (in path order) that maps `c`, reading each file not
-    /// yet indexed as the search reaches it. Returns whether a loaded face now covers `c`.
+    /// The coverage index, its file list brought up to date with the catalog.
     #[cfg(not(target_arch = "wasm32"))]
-    fn indexed_fallback(&self, c: char) -> bool {
-        let cp = u32::from(c);
+    fn coverage_index(&self) -> std::sync::MutexGuard<'_, CoverageIndex> {
         let mut index = self.coverage.lock().unwrap_or_else(|e| e.into_inner());
         let generation = self.catalog_gen.load(Ordering::Acquire);
         if index.generation != Some(generation) {
@@ -1742,6 +1744,52 @@ impl FontDb {
             index.files = paths.into_iter().map(|path| known.remove(&path).unwrap_or(IndexedFile { path, ranges: None, used: false })).collect();
             index.generation = Some(generation);
         }
+        index
+    }
+
+    /// Load, with all its styles, the family of the first cataloged font file (in path order)
+    /// that maps every character of `chars`: a run no loaded face covers whole although each of
+    /// its characters is covered (#1549: the preferred Thai fallback has no Latin letters, the
+    /// document's other fonts no Thai). Returns true if a family was loaded.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn indexed_fallback_run(&self, chars: &[char]) -> bool {
+        if !self.sys.lock().unwrap_or_else(|e| e.into_inner()).enabled {
+            return false;
+        }
+        let cps: Vec<u32> = chars.iter().filter(|c| !c.is_control() && !c.is_whitespace()).map(|c| u32::from(*c)).collect();
+        if cps.is_empty() {
+            return false;
+        }
+        let found = {
+            let mut index = self.coverage_index();
+            let CoverageIndex { files, reads, .. } = &mut *index;
+            let mut found = None;
+            for file in files.iter_mut() {
+                if file.ranges.is_none() {
+                    *reads += 1;
+                    file.ranges = Some(read_fallback_file(&file.path).as_deref().map(coverage_ranges).unwrap_or_default());
+                }
+                if file.ranges.as_deref().is_some_and(|r| cps.iter().all(|cp| ranges_hold(r, *cp))) {
+                    file.used = true;
+                    found = Some(file.path.clone());
+                    break;
+                }
+            }
+            found
+        };
+        let Some(path) = found else {
+            return false;
+        };
+        let family = self.read_catalog().iter().find(|e| e.path == path).map(|e| e.family.clone());
+        family.is_some_and(|f| self.load_cataloged(&f))
+    }
+
+    /// Load the first cataloged font file (in path order) that maps `c`, reading each file not
+    /// yet indexed as the search reaches it. Returns whether a loaded face now covers `c`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn indexed_fallback(&self, c: char) -> bool {
+        let cp = u32::from(c);
+        let mut index = self.coverage_index();
         let CoverageIndex { files, reads, .. } = &mut *index;
         for file in files.iter_mut().filter(|f| !f.used) {
             let mut data = None;
