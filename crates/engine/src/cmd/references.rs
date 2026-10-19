@@ -936,16 +936,11 @@ pub fn update_seq(s: &mut Session) -> Result<(), CmdError> {
     let mut seq: std::collections::HashMap<String, (u32, u32)> = Default::default();
     // Built on the first STYLEREF (field results don't change what it finds).
     let mut styles: Option<wordcraft_layout::styleref::StyleIndex> = None;
-    let mut order: Vec<(StoryRef, Path, Path)> = Vec::new();
-    for path in s.doc.para_paths(StoryRef::Body) {
-        let boxes: Vec<u32> =
-            s.doc.para(StoryRef::Body, &path).map(|p| p.objects.iter().flat_map(InlineObject::text_boxes).collect()).unwrap_or_default();
-        order.push((StoryRef::Body, path.clone(), path.clone()));
-        for id in boxes {
-            order.extend(s.doc.para_paths(StoryRef::Part(id)).into_iter().map(|p| (StoryRef::Part(id), p, path.clone())));
+    let mut body = Path::top(0);
+    for (story, path) in s.doc.body_para_paths() {
+        if story == StoryRef::Body {
+            body = path.clone();
         }
-    }
-    for (story, path, body) in order {
         let Some(p) = s.doc.para(story, &path) else { continue };
         if story == StoryRef::Body
             && let Some(l) = heading_style_level(p)
