@@ -299,8 +299,8 @@ impl WordApp {
         if let Err(e) = self.finish_pick(b.after, picked) {
             log::warn!("file browser: {e}");
         }
-        // A dialog that asked for the file keeps the keyboard.
-        if self.dialog.is_none() {
+        // A modal dialog (the one that asked for the file, or one the pick opened) keeps the keyboard.
+        if !self.modal_open() {
             self.canvas.want_focus = true;
         }
     }
@@ -617,6 +617,18 @@ mod tests {
         assert!(h.state().dialog.is_some(), "the dialog is back on top");
         assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "", "it keeps the keyboard");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3859: beside a modeless dialog (Find) the document takes the keyboard back.
+    #[test]
+    fn the_document_takes_the_keyboard_back_beside_a_modeless_dialog() {
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        a.dialog = crate::dialogs::Dialog::open("find", &mut a);
+        assert!(a.dialog.as_ref().is_some_and(|d| !d.is_modal()));
+        a.show_file_browser(FileDialogRequest::Open { purpose: "document".into() }, AfterPick::OpenDocument, false);
+        a.canvas.want_focus = false;
+        a.close_file_browser(None);
+        assert!(a.canvas.want_focus);
     }
 
     /// #3859: the browser is modal on its own too: no keytips run behind it.
