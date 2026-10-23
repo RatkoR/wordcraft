@@ -962,6 +962,19 @@ pub(crate) fn color_field(ui: &mut Ui, theme: &[wordcraft_doc::Rgb], value: &mut
 }
 
 impl Dialog {
+    /// Whether the dialog blocks the rest of the window while it is open. As in Word for Mac
+    /// (16.114.1, #3859), all are but those you keep working beside.
+    pub fn is_modal(&self) -> bool {
+        use crate::dialogs_insert::InsertDialog;
+        use crate::dialogs_refs::RefsDialog;
+        match self {
+            Dialog::Find { .. } | Dialog::InsertMergeField { .. } => false,
+            Dialog::Insert(d) => !matches!(**d, InsertDialog::Symbol(_)),
+            Dialog::Refs(d) => !matches!(**d, RefsDialog::MarkEntry(_) | RefsDialog::CrossRef(_)),
+            _ => true,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Dialog::RenameDocument { .. } => "renameDocument",
@@ -1426,6 +1439,29 @@ fn count_dialog_frame(ctx: &egui::Context, id: egui::Id) {
     }
 }
 
+/// Makes `window` modal (#3859): the document gives up the keyboard now, and from the next frame
+/// nothing beneath the window takes the pointer or Tab.
+pub(crate) fn block_behind(app: &WordApp, ctx: &egui::Context, window: &egui::Response) {
+    let layer = window.layer_id;
+    // egui's hit test doesn't look at the modal layer, so a transparent backdrop just under the
+    // window takes the clicks; nothing is dimmed, as in Word.
+    let screen = ctx.content_rect();
+    egui::Area::new(layer.id.with("modal_backdrop")).order(layer.order).fixed_pos(screen.min).show(ctx, |ui| {
+        ui.allocate_rect(screen, Sense::CLICK | Sense::DRAG);
+    });
+    ctx.move_to_top(layer);
+    ctx.memory_mut(|m| m.set_modal_layer(layer));
+    ctx.accesskit_node_builder(window.id, |node| node.set_modal());
+    release_keyboard(app, ctx);
+}
+
+/// Takes the keyboard from the document while a modal window is open.
+pub(crate) fn release_keyboard(app: &WordApp, ctx: &egui::Context) {
+    if let Some((id, _)) = app.canvas.widget_id {
+        ctx.memory_mut(|m| m.surrender_focus(id));
+    }
+}
+
 pub fn show(app: &mut WordApp, ctx: &egui::Context) {
     let Some(mut d) = app.dialog.take() else {
         ctx.data_mut(|d| d.remove::<(egui::Id, u8)>(dialog_top_key()));
@@ -1511,6 +1547,10 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
         }
         count_dialog_frame(ctx, id);
         close |= crate::window_close::show(ctx, &shown.response, &Tokens::get(ctx));
+        // A file browser it opened (Attach…, Browse…) stays above it.
+        if d.is_modal() && !close && !app.file_browser_open() {
+            block_behind(app, ctx, &shown.response);
+        }
     }
     if close {
         app.canvas.want_focus = true;
@@ -4118,6 +4158,80 @@ mod tests {
         assert_eq!(goto_page(""), Some(json!({"pageBy": 1})));
         for junk in ["0", "abc", "+x", "1.5", "99999999999999999999999"] {
             assert_eq!(goto_page(junk), None, "{junk}");
+        }
+    }
+
+    /// #3859: a dialog is modal, as in Word. While Font is open, typing (from the frame it opens),
+    /// Mod+O and a click on File reach nothing behind it, and the dialog itself still works. Find
+    /// and Replace is modeless: with it open, File still opens.
+    #[test]
+    fn modal_dialogs_block_the_window_behind_them() {
+        use egui_kittest::kittest::Queryable;
+        let picks = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        let counted = picks.clone();
+        a.services.pick_open = Some(Box::new(move |_| {
+            counted.set(counted.get() + 1);
+            None
+        }));
+        let mut h = app_harness(a);
+        h.run_steps(6);
+        let body = |h: &egui_kittest::Harness<WordApp>| h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+        let open = |h: &mut egui_kittest::Harness<WordApp>, name: &str| {
+            let d = Dialog::open(name, h.state_mut());
+            assert!(d.is_some(), "{name}");
+            h.state_mut().dialog = d;
+            h.run_steps(4);
+        };
+        h.event(egui::Event::Text("Kilns".into()));
+        h.run_steps(2);
+        assert_eq!(body(&h), "Kilns");
+
+        let font = Dialog::open("font", h.state_mut());
+        h.state_mut().dialog = font;
+        h.event(egui::Event::Text("x".into()));
+        h.event(egui::Event::Key { key: egui::Key::O, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+        h.run_steps(2);
+        assert_eq!(body(&h), "Kilns", "typing doesn't reach the document");
+        assert_eq!(picks.get(), 0, "Mod+O opens nothing");
+        h.run_steps(2);
+        h.get_by_label("File").click();
+        h.run_steps(4);
+        assert!(!h.state().ui.backstage, "File doesn't open");
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel").click();
+        h.run_steps(4);
+        assert!(h.state().dialog.is_none(), "Cancel closes the dialog");
+        h.event(egui::Event::Text("!".into()));
+        h.run_steps(2);
+        assert_eq!(body(&h), "Kilns!", "the document takes typing again");
+
+        open(&mut h, "find");
+        h.get_by_label("File").click();
+        h.run_steps(4);
+        assert!(h.state().ui.backstage, "File opens beside Find");
+    }
+
+    /// Which dialogs leave the window working (#3859, Word for Mac 16.114.1).
+    #[test]
+    fn find_symbol_mark_entry_cross_reference_and_merge_fields_are_modeless() {
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        for (name, modal) in [
+            ("find", false),
+            ("replace", false),
+            ("goto", false),
+            ("symbol", false),
+            ("crossReference", false),
+            ("markEntry", false),
+            ("insertMergeField", false),
+            ("font", true),
+            ("paragraph", true),
+            ("pageSetup", true),
+            ("wordCount", true),
+            ("bookmark", true),
+            ("insertTable", true),
+        ] {
+            let d = Dialog::open(name, &mut a);
+            assert_eq!(d.as_ref().map(Dialog::is_modal), Some(modal), "{name}");
         }
     }
 
