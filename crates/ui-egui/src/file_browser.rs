@@ -311,11 +311,8 @@ pub(crate) fn show(app: &mut WordApp, ctx: &egui::Context) {
     let Some(mut b) = app.file_browser.open.take() else { return };
     let t = Tokens::get(ctx);
     let mut done: Option<Option<PathBuf>> = None;
-    let window = egui::Window::new(tl!(b.title()))
-        .id(egui::Id::new("builtin_file_browser"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, vec2(0.0, -20.0));
+    let id = egui::Id::new("builtin_file_browser");
+    let window = egui::Window::new(tl!(b.title())).id(id).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, -20.0));
     let shown = crate::window_close::window(ctx, window).show(ctx, |ui| {
         ui.set_width(620.0);
         done = body(ui, &mut b, &t);
@@ -330,6 +327,7 @@ pub(crate) fn show(app: &mut WordApp, ctx: &egui::Context) {
     }
     app.file_browser.open = Some(b);
     if let Some(picked) = done {
+        crate::dialogs::forget_nudge(ctx, id);
         app.close_file_browser(picked);
     }
 }
