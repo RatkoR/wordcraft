@@ -2270,6 +2270,22 @@ fn column_segments_take_the_same_x_range_on_every_line() {
 }
 
 #[test]
+fn line_box_left_is_the_column_edge_before_indents_and_alignment() {
+    // Where a floating object's anchor mark goes (#4195): the same edge for a plain, an indented
+    // and a centred paragraph; nothing for a page the line isn't on.
+    let mut d = Document::from_text("Plain\nIndented\nCentred");
+    d.para_mut(wordcraft_doc::StoryRef::Body, &wordcraft_doc::Path::top(1)).unwrap().props.indent_left = Some(36.0);
+    d.para_mut(wordcraft_doc::StoryRef::Body, &wordcraft_doc::Path::top(2)).unwrap().props.align = Some(Align::Center);
+    let l = lay(&d);
+    let edge = l.caret(&Pos::body(0, 0)).unwrap().x;
+    for i in 0..3 {
+        assert_eq!(l.line_box_left(&Pos::body(i, 0), 0), Some(edge), "paragraph {i}");
+    }
+    assert!(l.caret(&Pos::body(1, 0)).unwrap().x > edge && l.caret(&Pos::body(2, 0)).unwrap().x > edge);
+    assert_eq!(l.line_box_left(&Pos::body(0, 0), 1), None);
+}
+
+#[test]
 fn display_has_glyphs_and_marks() {
     let mut d = Document::from_text("Hello\tworld");
     d.format_range(&Pos::body(0, 0), &Pos::body(0, 5), &|c| c.underline = Some(wordcraft_doc::props::Underline::Single)).unwrap();
