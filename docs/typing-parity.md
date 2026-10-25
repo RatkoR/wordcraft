@@ -56,6 +56,7 @@ Bullets and Numbering decide whether to toggle off from the selected paragraphs'
 | Enter on an empty **nested** item | moves it up one level; only a top-level empty item leaves the list. The same when the list comes from the paragraph style (List Number 2 in a Word file, #2143) | `enter_on_an_empty_nested_item_moves_it_up_a_level_first`, `enter_on_an_empty_item_numbered_by_its_style_moves_it_up_a_level` |
 | `* ` Enter (nothing typed) | list cancelled, Normal paragraph | `enter_right_after_starting_a_list_cancels_it` |
 | Tab / Shift+Tab at the start of an item | demote / promote | `shift_tab_and_tab_change_list_levels` |
+| Tab with a whole paragraph (or several paragraphs) selected | indents the paragraph(s) by one default tab stop; the text stays. A partial selection inside one paragraph is replaced by a tab character | `tab_with_a_whole_paragraph_selected_indents_it`, `tab_with_a_partial_selection_still_inserts_a_tab` |
 | Backspace at the start of an item | 1st: number removed, indent kept; 2nd: Normal paragraph — **not** joined to the one above | `backspace_at_the_start_of_an_item_removes_the_number_then_the_indent` |
 | Enter mid-item / at item start | splits the item / inserts an empty item above | `enter_in_the_middle_or_at_the_start_of_an_item` |
 | Shift+Enter in an item | line break inside the same item | `shift_enter_stays_inside_the_list_item` |
@@ -155,6 +156,13 @@ ideographic space (`autocorrect_finds_the_word_after_a_wide_space`):
   is “ (U+201C) even though it shows on the right of the word, after a letter ” (U+201D); in an
   acronym (`צה"ל`) it becomes ” as in Word for Mac 16.113.4, not gershayim (״); `'` after a letter
   (`ג'ירפה`) is ’ as after any letter, with no geresh conversion (not yet checked in Word; `smart_quotes_in_hebrew_use_logical_order`, #1670).
+- Add a period with double-space (File › Options › Proofing › AutoCorrect Options › AutoFormat As
+  You Type, `tools.autocorrect {"doubleSpacePeriod"}`; **off by default**, as macOS's system switch
+  is a per-user choice): a second Space after a letter, a digit or a closing bracket or quote turns
+  the first into a period (`Hello  world`→`Hello. world`). Other punctuation before the spaces,
+  a lone space, the start of a paragraph, a tab, a selection typed over and a third space are left
+  as typed; Undo puts the two spaces back (`double_space_adds_a_period_when_asked`, #2848). Not
+  observed in Word; Word for Mac follows the macOS setting.
 - Correct TWo INitial CApitals: a finished word of three or more letters with two capitals and
   the rest lowercase loses its second capital (`WOrd`→`Word`, `TEh`→`The`); not the exceptions
   (`IDs`, `CDs`, `PCs`, `TVs`, … plus the user's, `tools.autocorrect {"addInitialCapsException"}`)
@@ -426,6 +434,7 @@ again.
 | 2026-10-19 | trivial | Delete on whole selected cells (rows, columns, the table, a cell) leaves one empty paragraph in each, with the cell's last paragraph's formatting; nested tables go too (#2802) |
 | 2026-10-19 | trivial | Ctrl+Tab (⌥Tab on macOS) types a tab character in a table cell (#3137) |
 | 2026-10-16 | trivial | AltGr on Linux (Wayland) types ś, ł, ż… instead of opening KeyTips: the modifiers event without Alt that follows the Right Alt key no longer reads as Alt let go, and a bare AltGr tap doesn't open KeyTips (#2388) |
+| 2026-10-20 | trivial | AutoFormat As You Type: optional "Add a period with double-space" (off by default), undoable (#2848) |
 | 2026-10-18 | trivial | Typing over a selection takes the first selected character's formatting, also when the selection was made right to left (#2879) |
 | 2026-10-17 | trivial | A table inserted in a right-to-left paragraph is a right-to-left table, so Tab moves to the cell on the left (#2634) |
 | 2026-10-15 | trivial | Backspace after a section break and Delete before it remove the break, also one on the last paragraph's mark; the text takes the following section's setup and keeps the headers it showed (#2127) |
