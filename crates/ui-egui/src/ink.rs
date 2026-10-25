@@ -388,7 +388,7 @@ pub fn replay_bar(app: &mut WordApp, ui: &Ui, area: Rect) {
     let Some(r) = app.canvas.ink_ui.replay.as_ref() else { return };
     let (playing, n, total) = (r.playing, r.started(), r.strokes.len());
     let mut action = None;
-    egui::Area::new(egui::Id::new("ink_replay_bar"))
+    egui::Area::new(egui::Id::unique("ink_replay_bar"))
         .order(egui::Order::Foreground)
         .interactable(!app.modal_open())
         .pivot(Align2::CENTER_BOTTOM)
