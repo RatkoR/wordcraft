@@ -5491,9 +5491,14 @@ fn float_then_flow_table(y: f32) -> DocLayout {
 #[test]
 fn a_flow_table_starts_below_a_float_a_twip_down() {
     let l = float_then_flow_table(0.05);
-    let [(_, floated_y, _)] = para_at(&l, &[0, 0, 0, 0])[..] else { panic!("floated text missing") };
-    let [(_, flow_y, _)] = para_at(&l, &[1, 0, 0, 0])[..] else { panic!("flow text missing") };
-    assert!(flow_y > floated_y + 10.0, "flow table at {flow_y}, over the floating table at {floated_y}");
+    let cell = |t: usize| {
+        l.pages[0].items.iter().find_map(|i| match i {
+            Placed::Cell { rect, table, row: 0, cell: 0, .. } if *table == Path::top(t) => Some(*rect),
+            _ => None,
+        })
+    };
+    let (Some(floated), Some(flow)) = (cell(0), cell(1)) else { panic!("cells missing") };
+    assert!(flow.y >= floated.bottom(), "flow cell at {}, over the floating cell ending at {}", flow.y, floated.bottom());
 }
 
 /// A float further down than the flow table's first row reaches doesn't push the table below it.
