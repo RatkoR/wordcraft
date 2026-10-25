@@ -2286,6 +2286,22 @@ fn line_box_left_is_the_column_edge_before_indents_and_alignment() {
 }
 
 #[test]
+fn para_start_on_is_the_paragraphs_first_line_on_that_page() {
+    // Where a floating object's anchor mark goes (#4195): the paragraph's first line, or on a
+    // page it continues onto, its top line there, as Word shows it; nothing for a page it isn't on.
+    let d = Document::from_text(&format!("{}\nShort.", "The quick brown fox jumps over the lazy dog. ".repeat(400)));
+    let l = lay(&d);
+    assert!(l.pages.len() >= 3, "pages {}", l.pages.len());
+    let long = Pos::body(0, 0);
+    assert_eq!(l.para_start_on(&long, 0), Some(0));
+    let top = l.para_start_on(&long, 1).unwrap();
+    assert!(top > 0);
+    assert_eq!(l.caret_on(&Pos::body(0, top), 1).unwrap().page, 1);
+    assert_eq!(l.caret_on(&Pos::body(0, top - 1), 1).unwrap().page, 0, "the line before it ends page 0");
+    assert_eq!(l.para_start_on(&Pos::body(1, 0), 0), None, "the short paragraph is on the last page");
+}
+
+#[test]
 fn display_has_glyphs_and_marks() {
     let mut d = Document::from_text("Hello\tworld");
     d.format_range(&Pos::body(0, 0), &Pos::body(0, 5), &|c| c.underline = Some(wordcraft_doc::props::Underline::Single)).unwrap();

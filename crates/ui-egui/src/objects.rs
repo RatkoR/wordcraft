@@ -676,25 +676,30 @@ fn drop_anchor(app: &WordApp, layout: &DocLayout, d: &ObjectDrag) -> Option<(Pos
     }
     let r = d.drag.rect;
     let (_, at, _) = wordcraft_engine::cmd::objects::drop_anchor(&app.session.doc, layout, page, (r.x, r.y), (r.w, r.h), d.object.story)?;
-    Some((Pos { off: 0, ..at }, page))
+    Some((at, page))
 }
 
-/// The paragraph the anchor mark sits beside, and its page: a selected floating object's, or
-/// while it's moved or resized, the one the drop will anchor it to, as Word moves its anchor
-/// along (#4195). None in Read Mode and for objects in table cells.
+/// Where the anchor mark sits, and its page: beside the first line of a selected floating
+/// object's paragraph, or while it's moved or resized, of the one the drop will anchor it to, as
+/// Word moves its anchor along (#4195). On a page the paragraph continues onto, beside its top
+/// line there, as Word does. None in Read Mode and for objects in table cells.
 fn anchor_mark(app: &WordApp, layout: &DocLayout) -> Option<(Pos, usize)> {
     let (pos, obj) = selected(app)?;
     if !obj.is_floating() || pos.path.depth() > 0 || app.session.view.read_mode {
         return None;
     }
-    if let Some(at) = app.canvas.obj_drag.as_ref().and_then(|d| d.anchor_at.clone()) {
-        return Some(at);
-    }
-    let page = layout.object(&pos, app.session.page_hint)?.page;
-    Some((Pos { off: 0, ..pos }, page))
+    let (pos, page) = match app.canvas.obj_drag.as_ref().and_then(|d| d.anchor_at.clone()) {
+        Some(at) => at,
+        None => {
+            let page = layout.object(&pos, app.session.page_hint)?.page;
+            (pos, page)
+        }
+    };
+    let off = layout.para_start_on(&pos, page).unwrap_or(0);
+    Some((Pos { off, ..pos }, page))
 }
 
-/// Word's anchor mark, left of the text beside the first line of [`anchor_mark`]'s paragraph.
+/// Word's anchor mark, left of the text beside [`anchor_mark`]'s line.
 fn paint_anchor(app: &WordApp, painter: &Painter, layout: &DocLayout, pages: &[Rect], scale: f32) {
     let Some((pos, page)) = anchor_mark(app, layout) else { return };
     let Some(c) = layout.caret_on(&pos, page) else { return };
@@ -1189,6 +1194,50 @@ mod tests {
         assert_eq!(pos.path, wordcraft_doc::Path::top(2), "dropped where the anchor showed");
         let layout = h.state_mut().session.layout();
         assert_eq!(anchor_mark(h.state(), &layout), Some((Pos::body(2, 0), 0)));
+    }
+
+    /// #4195: a floating shape dragged into the middle of a page that only continues a paragraph
+    /// begun earlier: while it's dragged, its anchor mark is beside that paragraph's top line on
+    /// the page, as in Word; not beside the line next to the shape, where the drop anchors it.
+    #[test]
+    fn the_anchor_mark_on_a_page_a_paragraph_continues_onto_is_beside_its_top_line() {
+        use crate::table_resize::tests::{H, button, steps};
+        let mut a = WordApp::new(wordcraft_engine::Session::new(Document::new()), crate::Services::default());
+        a.run("view.commentsPane", json!({"value": false})).unwrap();
+        a.run("text.insert", json!({"text": "The quick brown fox jumps over the lazy dog. ".repeat(400)})).unwrap();
+        a.run("caret.docStart", json!({})).unwrap();
+        a.run("insert.shape", json!({"kind": "rectangle"})).unwrap();
+        a.run("arrange.wrap", json!({"wrap": "square"})).unwrap();
+        a.run("arrange.bounds", json!({"page": 0, "x": 100, "y": 250, "width": 100, "height": 50})).unwrap();
+        assert!(a.session.layout().pages.len() > 2, "a page the paragraph only continues onto");
+        let mut h: H = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 1800.0)).with_step_dt(0.25).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        steps(&mut h, 6);
+        let (pos, _) = selected(h.state()).expect("the shape is selected");
+        let layout = h.state_mut().session.layout();
+        assert_eq!(anchor_mark(h.state(), &layout), Some((Pos::body(0, 0), 0)));
+        let r = layout.object(&pos, 0).expect("laid out").rect;
+        let start = crate::canvas::page_to_screen(h.state_mut(), 0, r.x + r.w / 2.0, r.y + r.h / 2.0).expect("on screen");
+        let end = crate::canvas::page_to_screen(h.state_mut(), 1, 150.0, 300.0).expect("the next page is on screen");
+        h.event(egui::Event::PointerMoved(start));
+        h.step();
+        button(&h, start, true);
+        h.step();
+        for k in 1..=5 {
+            h.event(egui::Event::PointerMoved(start + (end - start) * (k as f32 / 5.0)));
+            h.step();
+        }
+        let top = layout.para_start_on(&Pos::body(0, 0), 1).expect("the paragraph continues onto page 1");
+        assert!(top > 0);
+        assert_eq!(anchor_mark(h.state(), &layout), Some((Pos::body(0, top), 1)));
+        let (at, _) = h.state().canvas.obj_drag.as_ref().and_then(|d| d.anchor_at.clone()).expect("dragging");
+        assert!(at.off > top, "the drop anchors it at the line by the shape, further down");
     }
 
     /// #1010: dragging a shape off text, the preview is the shape alone, not the text that was
