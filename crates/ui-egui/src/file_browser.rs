@@ -620,6 +620,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #3859: a modal dialog that closes as it opens the browser (Save in "Save changes?" for a new
+    /// document, with no system dialog) leaves the keyboard in the browser's name box: the
+    /// document doesn't take it back on the next frame.
+    #[test]
+    fn a_dialog_closing_into_the_browser_leaves_it_the_keyboard() {
+        use egui_kittest::kittest::Queryable;
+        let services = Services {
+            file_dialog: Some(Box::new(|_req| {
+                let (tx, rx) = channel();
+                tx.send(Err("no portal".to_string())).unwrap();
+                rx
+            })),
+            ..Default::default()
+        };
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
+        a.run("text.insert", json!({"text": "Unsaved"})).unwrap();
+        let _ = a.run("file.new", json!({}));
+        assert!(matches!(a.dialog, Some(crate::dialogs::Dialog::SaveChanges { .. })));
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        h.run_steps(4);
+        h.get_by_label("Save").click();
+        h.run_steps(4);
+        assert!(h.state().dialog.is_none() && h.state().file_browser_open(), "Save As goes on in the browser");
+        let before = h.state().file_browser.open.as_ref().map(|b| b.name.clone());
+        h.event(egui::Event::Text("x".into()));
+        h.run_steps(2);
+        let after = h.state().file_browser.open.as_ref().map(|b| b.name.clone());
+        assert_ne!(after, before, "typing goes into the name box");
+    }
+
     /// #3859: beside a modeless dialog (Find) the document takes the keyboard back.
     #[test]
     fn the_document_takes_the_keyboard_back_beside_a_modeless_dialog() {

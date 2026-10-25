@@ -1613,7 +1613,10 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
     }
     if close {
         forget_nudge(ctx, id);
-        app.canvas.want_focus = true;
+        // Not from a browser it opened as it closed (Save As): that one keeps the keyboard.
+        if !app.file_browser_open() {
+            app.canvas.want_focus = true;
+        }
     } else {
         app.dialog = Some(d);
     }
