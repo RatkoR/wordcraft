@@ -1016,7 +1016,7 @@ mod tests {
         assert_eq!(h.state().ui.keytips, crate::keytips::Phase::Off, "Alt during a drag isn't a keytip tap");
     }
 
-    /// #2233, #2234: dragging an In Line with Text picture into another paragraph shows a dashed
+    /// #2233, #2234: dragging an In Line with Text picture into another paragraph shows a bold
     /// insertion cursor at the text under the pointer (no alignment guides), and the drop puts the
     /// picture there, still inline and selected. Dropped back where it was, nothing changes.
     #[test]
