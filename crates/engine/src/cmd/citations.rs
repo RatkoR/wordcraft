@@ -1002,6 +1002,14 @@ fn page_of(s: &mut Session, pos: &Pos) -> u32 {
     l.caret(pos).and_then(|c| l.pages.get(c.page)).map(|p| p.number).unwrap_or(1)
 }
 
+/// Whether `a` comes before `b` in reading order: a text box's text right after the paragraph
+/// it is anchored in ([`Document::body_para_paths`]); elsewhere (a header), by position.
+fn reads_before(doc: &Document, a: &Pos, b: &Pos) -> bool {
+    let paths = doc.body_para_paths();
+    let key = |pos: &Pos| paths.iter().position(|(s, p)| *s == pos.story && *p == pos.path).map(|i| (i, pos.off));
+    if let (Some(x), Some(y)) = (key(a), key(b)) { x < y } else { a < b }
+}
+
 /// Entry lines (text, hanging indent) for a generated list.
 fn entries_for(s: &mut Session, kind: &str) -> Vec<(String, bool)> {
     if kind.starts_with("BIBLIOGRAPHY") {
@@ -1082,7 +1090,7 @@ fn cross_ref(s: &mut Session, v: &Value) -> CmdResult {
         "page" => page.to_string(),
         "number" => text.split(':').next().unwrap_or(&text).trim().to_string(),
         "aboveBelow" => {
-            if pos < s.sel.focus {
+            if reads_before(&s.doc, &pos, &s.sel.focus) {
                 "above".into()
             } else {
                 "below".into()
@@ -1415,6 +1423,25 @@ mod tests {
         s.run("text.newParagraph", &json!({})).unwrap();
         s.run("references.tableOfFigures", &json!({})).unwrap();
         assert!(s.doc.plain_text(StoryRef::Body).contains("Figure 1: The kiln\t2"), "{}", s.doc.plain_text(StoryRef::Body));
+    }
+
+    /// #3129: "above" or "below" a caption in a text box goes by the paragraph the box is anchored
+    /// in, not by the box coming after the whole body.
+    #[test]
+    fn above_or_below_a_caption_in_a_text_box_goes_by_its_anchor() {
+        let mut s = Session::new(wordcraft_doc::Document::from_text("Intro\nKilns\nSee "));
+        s.run("select.text", &json!({"text": "Kilns"})).unwrap();
+        s.run("caret.end", &json!({})).unwrap();
+        s.run("insert.shape", &json!({"kind": "ellipse", "width": 60, "height": 40})).unwrap();
+        s.run("arrange.wrap", &json!({"wrap": "square"})).unwrap();
+        s.run("references.caption", &json!({"label": "Figure", "text": "The kiln"})).unwrap();
+        let above_below = json!({"to": "figure", "target": "Figure 1", "show": "aboveBelow"});
+        s.sel = Selection::caret(s.doc.end_of(StoryRef::Body));
+        s.run("insert.crossReference", &above_below).unwrap();
+        assert!(s.doc.plain_text(StoryRef::Body).ends_with("See above"), "{}", s.doc.plain_text(StoryRef::Body));
+        s.sel = Selection::caret(Pos::body(0, 0));
+        s.run("insert.crossReference", &above_below).unwrap();
+        assert!(s.doc.plain_text(StoryRef::Body).starts_with("belowIntro"), "{}", s.doc.plain_text(StoryRef::Body));
     }
 
     /// #2940: a caption with a label of the person's own (Insert Caption › New Label) is a
