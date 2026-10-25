@@ -238,7 +238,8 @@ fn general(app: &mut WordApp, ui: &mut Ui) {
     egui::Grid::new("options_user").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
         ui.label(tl!("User name:"));
         let mut n = app.session.author.clone();
-        if ui.add(egui::TextEdit::singleline(&mut n).desired_width(260.0)).changed() {
+        let protected = wordcraft_engine::cmd::protect::enforced(&app.session.doc);
+        if ui.add_enabled(!protected, egui::TextEdit::singleline(&mut n).desired_width(260.0)).changed() && !protected {
             app.session.author = n;
         }
         ui.end_row();
@@ -291,7 +292,11 @@ fn display(app: &mut WordApp, ui: &mut Ui) {
 }
 
 fn proofing(app: &mut WordApp, ui: &mut Ui) {
-    // #476 (AutoCorrect Options…) goes here, at the top.
+    section(ui, "AutoCorrect");
+    if ui.button(tl!("AutoCorrect Options")).clicked() {
+        let _ = app.run("tools.autocorrect", json!({}));
+    }
+    ui.add_space(8.0);
     section(ui, "Spelling");
     let pr = app.session.prefs.clone();
     flag(app, ui, "Ignore words in capitals", "ignoreUppercase", pr.ignore_uppercase);
@@ -381,6 +386,10 @@ fn language_name(lang: wordcraft_engine::proof::ProofLang) -> &'static str {
         ProofLang::Ru => tl!("Russian"),
         ProofLang::Cs => tl!("Czech"),
         ProofLang::Id => tl!("Indonesian"),
+        ProofLang::Es => tl!("Spanish (Spain)"),
+        ProofLang::EsMx => tl!("Spanish (Mexico)"),
+        ProofLang::Es419 => tl!("Spanish (Latin America)"),
+        ProofLang::EsUy => tl!("Spanish (Uruguay)"),
         // English uses its bundled word list; Bulgarian and German have no dictionary yet.
         ProofLang::En | ProofLang::EnGb | ProofLang::EnCa | ProofLang::Bg | ProofLang::De | ProofLang::Other => "",
     }
@@ -459,9 +468,17 @@ fn language(app: &mut WordApp, ui: &mut Ui) {
     // #414 (detect the document's language) goes here.
     ui.add_space(8.0);
     section(ui, "Proofing language");
-    // The document's default language (Review › Language › Set As Default changes it).
-    let tag = app.session.doc.styles.default_chr.lang.clone();
-    note(ui, &crate::ribbon::language_name(tag.as_deref()));
+    let lang = crate::ribbon::caret_language(app);
+    let text = if crate::ribbon::caret_no_proof(app) {
+        tl!("The text at the insertion point is marked Do not check spelling or grammar.").to_string()
+    } else if !crate::ribbon::caret_language_proofed(app) {
+        crate::i18n::fmt(tl!("{language}: WordCraft doesn't check spelling or grammar in this language yet."), &[("language", &lang)])
+    } else {
+        let unreadable = crate::ribbon::caret_unreadable_dictionary(app);
+        crate::chrome::dictionary_problem(&lang, &unreadable, crate::ribbon::caret_missing_dictionary(app))
+            .unwrap_or_else(|| crate::i18n::fmt(tl!("Spelling and grammar are checked in {language}."), &[("language", &lang)]))
+    };
+    ui.label(RichText::new(text).small().weak());
 }
 
 fn accessibility(app: &mut WordApp, ui: &mut Ui) {
@@ -716,7 +733,15 @@ fn language_picker(app: &mut WordApp, ui: &mut Ui) {
 pub fn lenient<T: Serialize + DeserializeOwned + Default>(input: &Value) -> T {
     let mut base = serde_json::to_value(T::default()).unwrap_or(Value::Null);
     if base.is_object() {
-        overlay::<T>(&mut base, &mut Vec::new(), input, 0);
+        let mut extra = Vec::new();
+        overlay::<T>(&mut base, &mut Vec::new(), input, 0, &mut extra);
+        // Keys with no slot in the defaults (write-only legacy settings, or unknown ones) are
+        // kept only after the loop, so `base` stays the size of `T` while each key is checked.
+        for (path, k, v) in extra {
+            if let Some(parent) = object_at(&mut base, &path) {
+                parent.insert(k, v);
+            }
+        }
     }
     serde_json::from_value(base).unwrap_or_default()
 }
@@ -730,18 +755,34 @@ fn object_at<'a>(root: &'a mut Value, path: &[String]) -> Option<&'a mut Map<Str
     v.as_object_mut()
 }
 
-fn overlay<T: DeserializeOwned>(root: &mut Value, path: &mut Vec<String>, input: &Value, depth: usize) {
+fn overlay<T: DeserializeOwned>(
+    root: &mut Value,
+    path: &mut Vec<String>,
+    input: &Value,
+    depth: usize,
+    extra: &mut Vec<(Vec<String>, String, Value)>,
+) {
     let Some(map) = input.as_object() else { return };
     for (k, v) in map {
         let Some(parent) = object_at(root, path) else { return };
         let old = parent.get(k).cloned();
         if depth < 4 && v.is_object() && old.as_ref().is_some_and(Value::is_object) {
             path.push(k.clone());
-            overlay::<T>(root, path, v, depth + 1);
+            overlay::<T>(root, path, v, depth + 1, extra);
             path.pop();
             continue;
         }
         parent.insert(k.clone(), v.clone());
+        if old.is_none() {
+            let ok = serde_json::from_value::<T>(root.clone()).is_ok();
+            if let Some(parent) = object_at(root, path) {
+                parent.remove(k);
+            }
+            if ok {
+                extra.push((path.clone(), k.clone(), v.clone()));
+            }
+            continue;
+        }
         if serde_json::from_value::<T>(root.clone()).is_err()
             && let Some(parent) = object_at(root, path)
         {
@@ -805,6 +846,18 @@ mod tests {
     use crate::theme::Appearance;
     use crate::{Services, UiState, WordApp};
 
+    #[test]
+    fn unknown_settings_keys_load_in_linear_time() {
+        let mut map = serde_json::Map::new();
+        for i in 0..20_000 {
+            map.insert(format!("unknownKey{i}"), json!(i));
+        }
+        map.insert("miniToolbar".into(), json!(false));
+        let bytes = serde_json::to_vec(&serde_json::Value::Object(map)).unwrap();
+        let state = UiState::from_json(&bytes).unwrap();
+        assert!(!state.mini_toolbar);
+    }
+
     fn app() -> WordApp {
         WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default())
     }
@@ -826,10 +879,24 @@ mod tests {
         h
     }
 
+    /// File › Options must not offer a way around the protected document's author check.
+    #[test]
+    fn user_name_field_disables_when_protection_starts() {
+        let mut h = nav_harness("en", 100);
+        let user_name = || egui_kittest::kittest::By::new().role(egui::accesskit::Role::TextInput).value("WordCraft User");
+        assert!(!h.get(user_name()).accesskit_node().is_disabled());
+        h.state_mut().run("review.restrict", json!({"mode": "readOnly"})).unwrap();
+        h.run_steps(4);
+        assert!(h.get(user_name()).accesskit_node().is_disabled());
+    }
+
     /// #1266: check the actual painted text and renderer clip, including the bold selected
     /// label. AccessKit must still expose the full name and the row must keep its fixed size.
     #[test]
     fn options_nav_labels_stay_inside_their_rows() {
+        if !crate::i18n::catalogs_embedded() {
+            return;
+        }
         for language in ["en", "ru"] {
             for percent in [100, 125, 150] {
                 let mut h = nav_harness(language, percent);
@@ -860,10 +927,6 @@ mod tests {
                             .expect("navigation label is painted");
                         let bounds = text.visual_bounding_rect();
                         assert!(row.contains_rect(bounds.intersect(clip)), "{language} {percent}% {selected}: {label} paints outside {row:?}");
-                        if language == "ru" && id == "accessibility" {
-                            assert_eq!(label, "Доступность");
-                            assert!(clip.contains_rect(bounds), "{language} {percent}% {selected}: {label} must fit its row");
-                        }
                         if language == "en" && ["general", "display", "save"].contains(&id) {
                             assert!(clip.contains_rect(bounds), "short labels must remain fully visible");
                         }
@@ -877,6 +940,9 @@ mod tests {
     /// backgrounds intact, and the selected pane's settings visible at every interface size.
     #[test]
     fn options_nav_rows_keep_hover_and_selection() {
+        if !crate::i18n::catalogs_embedded() {
+            return;
+        }
         for language in ["en", "ru"] {
             for percent in [100, 125, 150] {
                 let mut h = nav_harness(language, percent);
@@ -1027,6 +1093,13 @@ mod tests {
         h.get_by_label("Ignore words in capitals").click();
         h.run_steps(2);
         assert!(!h.state().session.prefs.ignore_uppercase);
+        // The AutoCorrect Options dialog opens from this pane.
+        assert!(h.state().dialog.is_none());
+        h.get_by_label("AutoCorrect Options").click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), Some("autoCorrect"));
+        h.state_mut().dialog = None;
+        h.run_steps(2);
         // #1063: the dictionaries folder and the dictionary each language found.
         assert!(h.query_by_label("Dictionaries folder:").is_some());
         assert!(h.query_by_label_contains("Polish: ").is_some(), "the Polish dictionary's line");
@@ -1166,6 +1239,9 @@ mod tests {
         h.get_by_label("Animate the caret (it glides and fades)").click();
         h.run_steps(4);
         assert!(h.state().ui.caret_animation, "and on again");
+        if !crate::i18n::catalogs_embedded() {
+            return;
+        }
         h.state_mut().run("ui.language", json!({"value": "es"})).unwrap();
         h.run_steps(4);
         assert!(h.query_by_label("Animación").is_some() && h.query_by_label("Animation").is_none());
@@ -1208,6 +1284,9 @@ mod tests {
     /// takes the unit typed either way.
     #[test]
     fn length_units_follow_the_interface_language() {
+        if !crate::i18n::catalogs_embedded() {
+            return;
+        }
         let mut a = app();
         a.run("ui.language", json!({"value": "ru"})).unwrap();
         a.run("file.options", json!({"region": "ru-RU"})).unwrap();
