@@ -1,7 +1,9 @@
 use super::boxes::{BoxContext, BoxLayout, Edges, joined, layout_box, push_para};
 use super::cache::has_page_number_fields;
 use super::ctx::Ctx;
-use super::floats::{ObjFrame, anchor_floats, body_wraps, continued_exclusions, place_objects};
+use super::floats::{
+    LateFloats, ObjFrame, anchor_floats, anchor_lines, body_wraps, continued_exclusions, fitting, floating, place_late, place_objects,
+};
 use super::notes::{DECOR_STORY, NoteBox, para_notes};
 use super::page::{PageBuilder, PageFrame, item_bottom};
 use super::placed::Placed;
@@ -127,7 +129,11 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let mut page_map: Vec<(usize, u32)> = Vec::new();
     // Where its automatic equation numbers start: each layout of it again counts from here.
     let eq_start = ctx.eq_count;
-    let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, block, guess, space_before, excl_mark, &label, true);
+    let (mut float_rects, mut pl, mut rel, late_ids) = anchor_floats(ctx, pb, p, block, guess, space_before, excl_mark, &label, true, &[]);
+    let mut late = LateFloats::new(&late_ids);
+    // Whether the floats past the first piece were checked ([`late_floats`]), and those it held
+    // back.
+    let (mut rechecked, mut forced) = (false, Vec::new());
     // The page its fields were laid out for (and the width), and how many times it was laid out again for a later
     // page (bounded: a paragraph over hundreds of pages keeps the last number it got).
     let (mut laid_page, mut laid_width) = (pb.number, pb.col_w());
@@ -221,7 +227,10 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // A different top only matters when there is something to wrap around.
     if spot(pb) != placed_at || ((pb.y - guess).abs() > 0.01 && !pb.excl.is_empty()) {
         let y0 = pb.y;
-        (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, applied_before, excl_mark, &label, true));
+        let late_ids;
+        (float_rects, pl, rel, late_ids) =
+            again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, applied_before, excl_mark, &label, true, &[]));
+        late = LateFloats::new(&late_ids);
         (laid_page, laid_width) = (pb.number, pb.col_w());
         anchor_y = y0 - applied_before;
     }
@@ -230,6 +239,14 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let mut after_on_page: Option<f32> = None;
     let mut l0 = 0;
     while l0 < n {
+        // Late floats anchored in the lines that fit in this column are placed here, so these
+        // lines are broken again around them below.
+        if l0 > 0 && !pb.web && !late.placed.is_empty() {
+            late.piece = spot(pb);
+            for oi in late.due(p, &pl, l0..fitting(&pl, l0, pb.y, pb.bottom, (0, pb.top))) {
+                place_late(ctx, pb, p, oi, pb.y, &mut late);
+            }
+        }
         // The lines going into a new column (or page) were broken around the wrap areas where the
         // paragraph started: break them again around this column's (the lines before stay as they
         // were, and so do the paragraph's own floating objects), when they differ (#1374).
@@ -412,11 +429,37 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 pb.advance(block, body_top);
                 if l0 == 0 {
                     let y0 = pb.y;
-                    (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, true));
+                    let late_ids;
+                    (float_rects, pl, rel, late_ids) =
+                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, true, &[]));
+                    late = LateFloats::new(&late_ids);
                     (laid_page, laid_width) = (pb.number, pb.col_w());
                     anchor_y = y0;
                     n = pl.lines.len();
                 }
+                continue;
+            }
+        }
+        // Floats anchored past the first piece's lines, on the next page, though `anchor_floats`
+        // thought they would fit here (footnotes, widow control…): held back after all, once.
+        if l0 == 0 && l1 < n && !rechecked && !pb.web && pb.col + 1 >= pb.cols.len() {
+            rechecked = true;
+            let lines = anchor_lines(p, &pl);
+            let past = |(oi, o): (usize, &InlineObject)| {
+                (floating(o).is_some() && !late.placed.contains_key(&oi) && lines.get(oi).copied().flatten().is_some_and(|li| li >= l1)).then_some(oi)
+            };
+            forced = p.objects.iter().enumerate().filter_map(past).collect();
+            if !forced.is_empty() {
+                let mut force = forced.clone();
+                force.extend(late.placed.keys());
+                force.sort_unstable();
+                let (y0, before) = (pb.y, pb.y - anchor_y);
+                let late_ids;
+                (float_rects, pl, rel, late_ids) =
+                    again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, before, excl_mark, &label, true, &force));
+                late = LateFloats::new(&late_ids);
+                (laid_page, laid_width) = (pb.number, pb.col_w());
+                n = pl.lines.len();
                 continue;
             }
         }
@@ -457,6 +500,25 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
         }
         let end = push_para(&mut items, StoryRef::Body, &[block as u32], &pl, l0, l1, x, y, width, edges);
         pb.para_end = Some((pb.pages.len(), pb.col, end));
+        // Floats held back from here whose anchor came back once they were out of the way: placed
+        // here as before, with the text wrapping around them, rather than over it.
+        if l0 == 0 && !forced.is_empty() && late.due(p, &pl, 0..l1).iter().any(|oi| forced.contains(oi)) {
+            forced.clear();
+            let (y0, before) = (pb.y, pb.y - anchor_y);
+            let late_ids;
+            (float_rects, pl, rel, late_ids) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, before, excl_mark, &label, true, &[]));
+            late = LateFloats::new(&late_ids);
+            (laid_page, laid_width) = (pb.number, pb.col_w());
+            n = pl.lines.len();
+            continue;
+        }
+        // Late floats whose anchor line came here after all are placed with these lines.
+        late.piece = spot(pb);
+        if !pb.web && !late.placed.is_empty() {
+            for oi in late.due(p, &pl, 0..l1) {
+                place_late(ctx, pb, p, oi, if l0 == 0 { anchor_y } else { y }, &mut late);
+            }
+        }
         // Pictures, shapes and text boxes in these lines (web view: floats placed by this piece).
         let at = ObjFrame {
             page: Some(PageFrame { sect: pb.sect, origin: (0.0, 0.0), number: pb.number, mirror: ctx.mirror }),
@@ -464,8 +526,10 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
             para_y: if pb.web { y } else { anchor_y },
             table_chr: None,
             pinned: None,
+            late: Some(&late),
         };
         let (behind, front) = place_objects(ctx, StoryRef::Body, &[block as u32], p, &pl, (l0, l1), (x, y), &at, &float_rects, 0);
+        late.drew();
         items.extend(front);
         // Line numbers in the left margin.
         if let Some(ln) = pb.sect.line_numbers.clone().filter(|_| !pb.web && pl.rp.style != "Header" && !pl.rp.suppress_line_numbers)
@@ -535,8 +599,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 {
                     let y0 = pb.y;
                     // The floats were placed and drawn with the first piece: they stay there.
-                    let (rects, relaid, relaid_rel) = with_page_map(ctx, &mut page_map, |ctx| {
-                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, false))
+                    let (rects, relaid, relaid_rel, _) = with_page_map(ctx, &mut page_map, |ctx| {
+                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, false, &[]))
                     });
                     if let Some(k) = relaid.lines.iter().position(|l| l.start == resume) {
                         (float_rects, pl, rel) = (rects, relaid, relaid_rel);
@@ -612,6 +676,7 @@ pub(crate) fn place_outline_para(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragr
         para_y: y,
         table_chr: None,
         pinned: None,
+        late: None,
     };
     let (behind, front) = place_objects(ctx, StoryRef::Body, &[block as u32], &q, &pl, (0, l1), (x, y), &at, &HashMap::new(), 0);
     items.extend(front);
