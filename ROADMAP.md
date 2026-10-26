@@ -202,6 +202,7 @@ Imported Word 97–2003 `.doc`/`.dot` files now ask for a supported DOCX target 
 
 | Date | What landed |
 | 2026-10-17 | Password-protected Word files from Word 2007 (Standard encryption: AES-128/192/256, SHA-1) open with their password, also when named `.doc` or `.dot`; a wrong or missing password is reported as for newer files. Word 97-2003 files with an AES header, which the public spec doesn't define, are refused with a clear message (gap 9) |
+| 2026-10-25 | A picture or shape dropped beside the first line after a page break inside a paragraph stays on the new page, as in Word, instead of going back to the page before the break (#4262) |
 | 2026-10-25 | A picture or shape anchored in a line of a long paragraph on a later page is drawn on that page, as in Word, instead of the page the paragraph starts on; one dropped on such a page stays where it was dropped (#4250) |
 | 2026-10-23 | A command that changes nothing is not an edit: it adds no undo step, marks no unsaved changes and forces no relayout, so the redo stack survives it and five hundred of them can no longer push the user's own edits out of the undo history. |
 | 2026-10-23 | Interface translations come from storytold/craft-i18n, shared with the other Crafting Apps: the catalogs are embedded at build time from the commit in `craft-i18n.rev` and looked up through craft-libs' `craft-i18n` crate; `crates/ui-egui/src/i18n/*.tsv` are gone (translations now go to craft-i18n). Strings other apps already translate show translated; a build without `CRAFT_I18N_DIR` is English only |
@@ -641,6 +642,7 @@ Footer page-table height and body wrapping are corrected. Other pagination gaps 
 | 2026-10-22 | trivial | Progress log: several open documents in one session |
 | 2026-10-25 | trivial | Progress log: egui 0.37 migration records the `craft-i18n.rev` catalog pin (9205108…; 27 languages) and the input-method handling; managed CI passed; native acceptance and native-speaker review remain open |
 | 2026-10-17 | trivial | Progress log: Standard-encrypted (AES) Word files open (gap 9) |
+| 2026-10-25 | trivial | Progress log: a shape dropped just after a page break inside a paragraph stays on the new page (#4262) |
 | 2026-10-25 | trivial | Progress log: a floating object anchored on a later page of a long paragraph is drawn there (#4250) |
 | 2026-10-25 | trivial | Progress log: Text Highlight Color buttons show the remembered colour, or no colour bar after No Color (#4087) |
 | 2026-10-23 | minor | A command that changes nothing is not an edit: no undo step, no unsaved changes, no relayout, and the redo stack survives it. |
