@@ -422,6 +422,16 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
         while l1 > l0 && l1 < n && pl.lines.get(l1).is_some_and(|l| l.beside) {
             l1 -= 1;
         }
+        // Late floats placed for lines that went on after all wait for the next piece, and these
+        // lines are broken again without them; one whose own wrap pushed its line on stays, as
+        // before. Not once the lines can't be broken again.
+        let end = if l1 == l0 && pb.at_top() { l0 + 1 } else { l1 }; // what the overflow below keeps
+        if l0 > 0 && !pb.web && !late.placed.is_empty() && wrap_relays < MAX_WRAP_RELAYS {
+            let moved = late.release(p, &pl, end, &mut pb.excl) || late.keep_back(p, &pl, l0..end);
+            if moved && l1 > l0 {
+                continue;
+            }
+        }
         if l1 == l0 {
             if pb.fresh() {
                 l1 = l0 + 1; // can't fit even one line on an empty page: overflow

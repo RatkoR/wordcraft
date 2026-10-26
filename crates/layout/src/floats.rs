@@ -420,10 +420,12 @@ pub(crate) fn place_late(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, oi:
     let frame = PageFrame { sect: pb.sect, origin: (0.0, 0.0), number: pb.number, mirror: ctx.mirror };
     let rect = float_rect(Some(frame), (pb.col_x(), pb.col_w()), top, w, h, float);
     let outline = ctx.wrap_outline(o);
-    if let Some(area) = wrap_area(rect, float, outline.as_deref().map(|v| v.as_slice())) {
-        pb.excl.push(area);
-    }
-    late.placed.insert(oi, Some(LatePlace { rect, top, spot: (pb.pages.len(), pb.col), drawn: false }));
+    let area = wrap_area(rect, float, outline.as_deref().map(|v| v.as_slice())).map(|a| {
+        let bounds = a.0;
+        pb.excl.push(a);
+        bounds
+    });
+    late.placed.insert(oi, Some(LatePlace { rect, top, spot: (pb.pages.len(), pb.col), drawn: false, area }));
 }
 
 /// The line of `pl` each object of `p` goes with (by object index; None if it isn't laid out):
@@ -539,13 +541,14 @@ pub(crate) struct ObjFrame<'a> {
 }
 
 /// Where a late float ([`LateFloats`]) was placed: its rect, the top it's positioned from, the
-/// page and column, `(pages, col)`, and whether it's drawn.
+/// page and column, `(pages, col)`, whether it's drawn, and the bounds of its wrap area.
 #[derive(Clone, Copy)]
 pub(crate) struct LatePlace {
     pub(crate) rect: Rect,
     pub(crate) top: f32,
     pub(crate) spot: (usize, usize),
     pub(crate) drawn: bool,
+    pub(crate) area: Option<Rect>,
 }
 
 /// A body paragraph's floating objects anchored on a later page than its first line
@@ -558,25 +561,74 @@ pub(crate) struct LateFloats {
     pub(crate) piece: (usize, usize),
     /// [`anchor_lines`], and the paragraph layout they're for.
     pub(crate) lines: Option<(Arc<ParaLayout>, Vec<Option<usize>>)>,
+    /// Those a piece let go ([`LateFloats::release`]), and those it keeps all the same
+    /// ([`LateFloats::keep_back`]): (piece, object index).
+    pub(crate) held: Vec<((usize, usize), usize)>,
+    pub(crate) kept: Vec<((usize, usize), usize)>,
 }
 
 impl LateFloats {
     pub(crate) fn new(late: &[usize]) -> Self {
-        LateFloats { placed: late.iter().map(|oi| (*oi, None)).collect(), piece: (0, 0), lines: None }
+        LateFloats { placed: late.iter().map(|oi| (*oi, None)).collect(), piece: (0, 0), lines: None, held: Vec::new(), kept: Vec::new() }
     }
 
-    /// Those to place with this piece: not placed yet, or placed for a column the paragraph then
-    /// didn't go into, with their anchor line in `lines`, in order.
-    pub(crate) fn due(&mut self, p: &Paragraph, pl: &Arc<ParaLayout>, lines: std::ops::Range<usize>) -> Vec<usize> {
+    /// [`anchor_lines`] for `pl`.
+    pub(crate) fn refresh(&mut self, p: &Paragraph, pl: &Arc<ParaLayout>) {
         if !self.lines.as_ref().is_some_and(|(of, _)| Arc::ptr_eq(of, pl)) {
             self.lines = Some((pl.clone(), anchor_lines(p, pl)));
         }
-        let anchor = |oi: usize| self.lines.as_ref().and_then(|(_, v)| v.get(oi).copied().flatten());
+    }
+
+    /// The line object `oi` goes with ([`anchor_lines`]).
+    pub(crate) fn anchor(&self, oi: usize) -> Option<usize> {
+        self.lines.as_ref().and_then(|(_, v)| v.get(oi).copied().flatten())
+    }
+
+    /// Those placed with this piece whose anchor line is past `end` after all (notes, widow
+    /// control or a row kept together took lines [`fitting`] counted) wait for the next piece,
+    /// their wrap areas out of `excl`. Whether there were any.
+    pub(crate) fn release(&mut self, p: &Paragraph, pl: &Arc<ParaLayout>, end: usize, excl: &mut Vec<WrapArea>) -> bool {
+        self.refresh(p, pl);
+        let piece = self.piece;
+        let out: Vec<usize> = self
+            .placed
+            .iter()
+            .filter(|(oi, at)| at.is_some_and(|a| a.spot == piece && !a.drawn) && !self.kept.contains(&(piece, **oi)))
+            .filter(|(oi, _)| self.anchor(**oi).is_some_and(|li| li >= end))
+            .map(|(oi, _)| *oi)
+            .collect();
+        for oi in &out {
+            if let Some(Some(a)) = self.placed.insert(*oi, None)
+                && let Some(k) = a.area.and_then(|r| excl.iter().rposition(|w| w.0 == r))
+            {
+                excl.remove(k);
+            }
+            self.held.push((piece, *oi));
+        }
+        !out.is_empty()
+    }
+
+    /// Those this piece let go whose anchor line came back into `lines` without them (their own
+    /// wrap pushed it on): kept with this piece after all, as before. Whether there were any.
+    pub(crate) fn keep_back(&mut self, p: &Paragraph, pl: &Arc<ParaLayout>, lines: std::ops::Range<usize>) -> bool {
+        self.refresh(p, pl);
+        let piece = self.piece;
+        let back: Vec<_> =
+            self.held.iter().filter(|(pc, oi)| *pc == piece && self.anchor(*oi).is_some_and(|li| lines.contains(&li))).copied().collect();
+        self.held.retain(|h| !back.contains(h));
+        self.kept.extend(&back);
+        !back.is_empty()
+    }
+
+    /// Those to place with this piece: not placed yet (nor let go by it), or placed for a column
+    /// the paragraph then didn't go into, with their anchor line in `lines`, in order.
+    pub(crate) fn due(&mut self, p: &Paragraph, pl: &Arc<ParaLayout>, lines: std::ops::Range<usize>) -> Vec<usize> {
+        self.refresh(p, pl);
         let mut due: Vec<usize> = self
             .placed
             .iter()
             .filter(|(_, at)| at.is_none_or(|a| a.spot != self.piece && !a.drawn))
-            .filter(|(oi, _)| anchor(**oi).is_some_and(|li| lines.contains(&li)))
+            .filter(|(oi, _)| !self.held.contains(&(self.piece, **oi)) && self.anchor(**oi).is_some_and(|li| lines.contains(&li)))
             .map(|(oi, _)| *oi)
             .collect();
         due.sort_unstable();
@@ -591,8 +643,7 @@ impl LateFloats {
     /// The lines holding the anchors of those drawn with this piece (an anchor right after a
     /// break is on the line after its [`anchor_lines`] one).
     pub(crate) fn lines_here(&self) -> Vec<usize> {
-        let anchor = |oi: &usize| self.lines.as_ref().and_then(|(_, v)| v.get(*oi).copied().flatten());
-        self.placed.keys().filter(|oi| self.here(**oi).is_some()).filter_map(anchor).flat_map(|li| [li, li + 1]).collect()
+        self.placed.keys().filter(|oi| self.here(**oi).is_some()).filter_map(|oi| self.anchor(*oi)).flat_map(|li| [li, li + 1]).collect()
     }
 
     /// Those drawn with this piece are drawn.

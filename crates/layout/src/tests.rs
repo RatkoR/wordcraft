@@ -5461,6 +5461,67 @@ fn of_two_floats_held_back_only_the_one_whose_anchor_comes_back_stays_on_page_on
     assert_eq!((ys(0).len(), ys(1).len()), (1, 1), "one on each page: {:?} {:?}", ys(0), ys(1));
 }
 
+/// #4250: a footnote referenced on page two leaves less room there than its lines alone suggest;
+/// a float anchored on the first line it pushes on to page three is drawn on page three.
+#[test]
+fn a_float_anchored_on_a_line_a_footnote_pushes_on_is_drawn_on_the_next_page() {
+    let mut d = Document::from_text(&"The quick brown fox jumps over the lazy dog. ".repeat(600));
+    let mut note = wordcraft_doc::Paragraph::with_text(&"The note text runs on for a while. ".repeat(30), Default::default()).styled("FootnoteText");
+    note.props.space_after = Some(0.0);
+    let id = d.add_part(wordcraft_doc::PartKind::Footnote, vec![wordcraft_doc::para_block(note)]);
+    let noteref = InlineObject::NoteRef { kind: wordcraft_doc::para::NoteKind::Footnote, id, custom: String::new() };
+    let at = lines_on(&lay(&d), 1)[1].2;
+    d.insert_object(&Pos::body(0, at), noteref, &Default::default()).unwrap();
+    // A word into the line: an anchor at its very start goes with the line before.
+    let anchor = lines_on(&lay(&d), 2)[0].2 + "The ".len();
+    let f = wordcraft_doc::para::Float { wrap: wordcraft_doc::para::Wrap::Square, ..page_float(72.0, 300.0) };
+    d.insert_object(&Pos::body(0, anchor), rect_shape(100.0, 50.0, f), &Default::default()).unwrap();
+    let l = lay(&d);
+    let anchor_page = (0..l.pages.len()).rfind(|&pi| lines_on(&l, pi).first().is_some_and(|f| f.2 <= anchor));
+    let per_page: Vec<usize> = l.pages.iter().map(|p| shapes(&p.items).len()).collect();
+    assert_eq!(anchor_page, Some(2), "the anchor is on page three");
+    assert_eq!(&per_page[..3], [0, 0, 1], "{per_page:?}");
+    let beside: Vec<_> = lines_on(&l, 1).into_iter().filter(|(y, ..)| *y > 300.0 && *y < 350.0).collect();
+    assert!(!beside.is_empty() && beside.iter().all(|(_, left, _)| *left < 1.0), "page two doesn't wrap around it: {beside:?}");
+}
+
+/// #4250: widow control takes the line before a paragraph's last on to the next page with it; a
+/// float anchored there is drawn on that page.
+#[test]
+fn a_float_anchored_on_a_line_widow_control_takes_on_is_drawn_on_the_next_page() {
+    // A paragraph of three pages whose last two lines are on the third only by widow control.
+    let (mut d, l) = (150..300)
+        .map(|k| Document::from_text(&"The quick brown fox jumps over the lazy dog. ".repeat(k)))
+        .map(|d| {
+            let l = lay(&d);
+            (d, l)
+        })
+        .find(|(_, l)| l.pages.len() == 3 && lines_on(l, 2).len() == 2 && lines_on(l, 1).len() < lines_on(l, 0).len())
+        .expect("a paragraph ending in a widow");
+    let anchor = lines_on(&l, 2)[0].2 + "The ".len();
+    d.insert_object(&Pos::body(0, anchor), rect_shape(100.0, 50.0, page_float(72.0, 300.0)), &Default::default()).unwrap();
+    let per_page: Vec<usize> = lay(&d).pages.iter().map(|p| shapes(&p.items).len()).collect();
+    assert_eq!(per_page, [0, 0, 1]);
+}
+
+/// #4250: a float whose own wrap pushes its anchor line on to the next page stays on the page
+/// whose lines it was placed with, as before, with the text there wrapping around it.
+#[test]
+fn a_float_whose_wrap_pushes_its_own_line_on_stays_with_the_text_around_it() {
+    let mut d = Document::from_text(&"The quick brown fox jumps over the lazy dog. ".repeat(600));
+    let last = *lines_on(&lay(&d), 1).last().unwrap();
+    let anchor = last.2 + "The ".len();
+    let f = wordcraft_doc::para::Float { wrap: wordcraft_doc::para::Wrap::Square, ..page_float(72.0, 300.0) };
+    d.insert_object(&Pos::body(0, anchor), rect_shape(200.0, 100.0, f), &Default::default()).unwrap();
+    let l = lay(&d);
+    let anchor_page = (0..l.pages.len()).rfind(|&pi| lines_on(&l, pi).first().is_some_and(|f| f.2 <= anchor));
+    assert_eq!(anchor_page, Some(2), "its wrap pushes the anchor on to page three");
+    let per_page: Vec<usize> = l.pages.iter().map(|p| shapes(&p.items).len()).collect();
+    assert_eq!(&per_page[..3], [0, 1, 0], "{per_page:?}");
+    let beside: Vec<_> = lines_on(&l, 1).into_iter().filter(|(y, ..)| *y > 300.0 && *y < 400.0).collect();
+    assert!(!beside.is_empty() && beside.iter().all(|(_, left, _)| *left >= 200.0), "the text wraps around it: {beside:?}");
+}
+
 /// #4250: holding back a float for a later page lays its paragraph out again; its automatic
 /// equation numbers aren't counted twice: they read (1), (2).
 #[test]
